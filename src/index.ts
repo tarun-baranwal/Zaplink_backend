@@ -1,125 +1,93 @@
-import express from "express";
+import express, { Request, Response } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import dotenv from "dotenv";
-import routes from "./Routes/index";
 import cookieParser from "cookie-parser";
 import cron from "node-cron";
+import rateLimit from "express-rate-limit";
+import swaggerUi from "swagger-ui-express";
+
+import routes from "./Routes";
+import swaggerSpec from "./swagger";
+import requestLogger from "./middlewares/requestLogger";
 import {
   deleteExpiredZaps,
   deleteOverLimitZaps,
 } from "./utils/cleanup";
-import rateLimit from "express-rate-limit";
-import swaggerUi from "swagger-ui-express";
-import swaggerSpec from "./swagger";
-import { globalLimiter } from "./middlewares/rateLimiter";
-import multer from "multer";
-import { initializeCronJobs } from "./utils/cron";
 
+// ✅ Load environment variables
 dotenv.config();
 
 const app = express();
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
+// ✅ Trust proxy (important for rate limit & deployment)
 app.set("trust proxy", 1);
 
-// ── Security Hardening ────────────────────────────────────────────────────────
-// Helmet sets sensible HTTP security headers (CSP, HSTS, X-Frame-Options, etc.)
+// ✅ Body parsing
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+
+// ✅ Logger (must be before routes)
+app.use(requestLogger);
+
+// ✅ Security headers
 app.use(helmet());
 
-// CORS restricted to the configured frontend origin
-const FRONTEND_URL =
-  process.env.FRONTEND_URL || "https://zaplink.krishnapaljadeja.com";
-
-app.use(
-  cors({
-    origin: FRONTEND_URL,
-    credentials: true,
-  })
-);
-// Middleware
+// ✅ CORS configuration
 app.use(
   cors({
     origin: (process.env.CORS_ORIGIN || "http://localhost:5173")
       .split(",")
-      .map((o) => o.trim()),
-    methods: "GET,POST,PUT,DELETE",
-    allowedHeaders: "Content-Type,Authorization",
+      .map((origin) => origin.trim()),
     credentials: true,
-  }),
+  })
 );
 
-app.use(express.json());
-app.use(cookieParser());
-
-/**
- * @swagger
- * /:
- *   get:
- *     summary: API root
- *     tags: [Health]
- *     responses:
- *       200:
- *         description: API root message
- */
-app.get("/favicon.ico", (req: any, res: any) => res.status(204).end());
-app.get("/", (req: any, res: any) => res.status(200).send("ZapLink API Root"));
-
-/**
- * @swagger
- * /health:
- *   get:
- *     summary: Health check
- *     tags: [Health]
- *     responses:
- *       200:
- *         description: Server is healthy
- *         content:
- *           text/plain:
- *             schema:
- *               type: string
- */
-app.get('/health', (req:any, res:any) => {
-  res.status(200).send('OK');
-});
-
-// Swagger UI
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-  customCss: '.swagger-ui .topbar { display: none }',
-  customSiteTitle: 'ZapLink API Documentation',
-}));
-
-
-app.get("/health", (req: any, res: any) => {
-  res.status(200).send("OK");
-});
-
-// Rate limiter for all routes except favicon and root
+// ✅ Rate Limiting
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: process.env.NODE_ENV === "development" ? 1000 : 100, // higher in dev
+  max: process.env.NODE_ENV === "development" ? 1000 : 100,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.path === "/favicon.ico" || req.path === "/",
 });
 app.use(apiLimiter);
 
-// Use Routes
+// ✅ API Routes
 app.use("/api", routes);
 
-// ── Scheduled Cleanup Jobs ────────────────────────────────────────────────────
-// Runs every hour at minute 0 — sweeps expired and over-limit Zaps.
-cron.schedule("0 * * * *", async () => {
-  console.log("[Cron] Running scheduled Zap cleanup...");
-  await deleteExpiredZaps();
-  await deleteOverLimitZaps();
-  console.log("[Cron] Cleanup complete.");
+// ✅ Basic Routes
+app.get("/", (_req: Request, res: Response): void => {
+  res.status(200).send("ZapLink API Root");
 });
 
-// ── Start Server ──────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
+app.get("/health", (_req: Request, res: Response): void => {
+  res.status(200).json({ status: "OK" });
+});
+
+// Prevent favicon error
+app.get("/favicon.ico", (_req: Request, res: Response): void => {
+  res.status(204).end();
+});
+
+// ✅ Swagger Documentation
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
+// ✅ Cron Job (Runs every hour)
+cron.schedule("0 * * * *", async () => {
+  console.log("[Cron] Running scheduled Zap cleanup...");
+  try {
+    await deleteExpiredZaps();
+    await deleteOverLimitZaps();
+    console.log("[Cron] Cleanup complete.");
+  } catch (error) {
+    console.error("[Cron] Cleanup failed:", error);
+  }
+});
+
+// ✅ Start Server
+const PORT = Number(process.env.PORT) || 3000;
+
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`🚀 Server is running on port ${PORT}`);
 });
